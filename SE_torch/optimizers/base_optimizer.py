@@ -26,20 +26,22 @@ class WeightedSELoss(nn.Module):
         self.R = torch.diag(1./ v)
         self.norm_H = norm_H if norm_H is not None else torch.ones_like(z)
 
-    def forward(self, z_est):
+    def forward(self, z_est, x):
         error = ((self.z - z_est) / self.norm_H).reshape(-1, 1)
         weighted_squared_error = (error.T @ self.R @ error)
         return weighted_squared_error
 
 
 class WeightedSEWithPriorLoss(nn.Module):
-    def __init__(self, z, v, slk_bus, NF_config_path='../learn_prior/configs/NF_2_0_64.json'):
+    def __init__(self, z, v, slk_bus, norm_H=None, NF_config_path='../learn_prior/configs/NF_4_0_128.json'):
         super().__init__()
         self.z = z
         self.v = v
         self.R = torch.diag(1./ torch.sqrt(v))
         self.slk_bus = slk_bus
+        self.norm_H = norm_H if norm_H is not None else torch.ones_like(z)
         NF_config =  json.load(open(NF_config_path))
+        NF_config['device'] = 'cpu'
         ckpt_path = f"../learn_prior/NF/models/{NF_config.get('ckpt_name')}"
         self.flow_model = FlowModel(**NF_config)
         self.flow_model.load_state_dict(torch.load(ckpt_path))
@@ -56,7 +58,7 @@ class WeightedSEWithPriorLoss(nn.Module):
         prior = .5 * torch.norm(eps).pow(2)
         log_det = self.flow_model.log_det_inv_jacobian(x_norm).to(device='cpu')
         pl = prior - log_det
-        res_h = (self.R @ (self.z - z_est))
+        res_h = (self.R @ (self.z - z_est)) / self.norm_H
         lh = .5 * torch.norm(res_h).pow(2)
         loss = lh + pl
         return loss

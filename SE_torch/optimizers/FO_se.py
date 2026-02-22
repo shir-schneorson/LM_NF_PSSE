@@ -1,13 +1,16 @@
 import json
 
 import torch
+from sympy.physics.units import momentum
 from torch.optim import SGD, Muon, AdamW, LBFGS
 from torch.distributions import MultivariateNormal, Normal
 from tqdm import tqdm
 
 from SE_torch.learn_prior.NF.NF import FlowModel
 from SE_torch.learn_prior.VAE.VAE import AmortizedVAE
+from SE_torch.optimizers.LM_opt import LMOpt
 from SE_torch.optimizers.base_optimizer import SEOptimizer, WeightedSELoss, WeightedSEWithPriorLoss, WeightedSECartWithPriorLoss
+from SE_torch.optimizers.se_loss import SELossNF, SELoss
 
 
 class LBFGS_se(SEOptimizer):
@@ -359,6 +362,108 @@ class LBFGS_se_cart(SEOptimizer):
         Vc = x_cart[:self.nb] + 1j * x_cart[self.nb:]
         T, V = Vc.angle(), Vc.abs()
         return x_cart, T, V, converged, it
+
+
+class GDBT_se(SEOptimizer):
+    def __init__(self, **kwargs):
+        super(GDBT_se, self).__init__(**kwargs)
+        self.tol = kwargs.get('tol', 1e-7)
+        self.beta = kwargs.get('beta', 0.5)
+        self.t0 = kwargs.get('t0', 1e-8)
+        self.c = kwargs.get('c', 0.2)
+        self.t_min = kwargs.get('t_min', 1e-12)
+        self.max_iter = int(kwargs.get('max_iter', 2000))
+        self.verbose = kwargs.get('verbose', True)
+        self.use_prior = kwargs.get('use_prior', False)
+        self.prior_config_path = kwargs.get('prior_config_path')
+
+    def __call__(self, x0, z, v, slk_bus, h_ac, nb ,norm_H=None):
+        x = x0.clone()
+        x.requires_grad = True
+        all_x = [x.clone().detach()]
+        non_slk_bus = (torch.arange(nb * 2) != slk_bus[0]).type(torch.get_default_dtype())
+        slk_vec = torch.zeros_like(non_slk_bus)
+        slk_vec[slk_bus[0]] = slk_bus[1]
+
+        if self.use_prior:
+            criterion = WeightedSEWithPriorLoss(z, v, slk_bus[0], NF_config_path=self.prior_config_path, norm_H=norm_H)
+            final_opt = LMOpt(loss_func=SELossNF(NF_config_path=self.prior_config_path, with_log_det=True), verbose=False, delta_init=None)
+        else:
+            criterion = WeightedSELoss(z, v, norm_H=norm_H)
+            final_opt = LMOpt(loss_func=SELoss(), verbose=False, delta_init=None)
+
+        loss_prev = torch.inf
+        z_est = h_ac.estimate(x)
+        loss = criterion(z_est, x)
+        x_prev = x
+        converged = False
+        k = 0
+        pbar = tqdm(range(int(self.max_iter)), desc=f'Optimizing with GDBT', leave=True, colour='green',
+                    postfix={'loss': f"{loss_prev:.4f}"})
+        for k in pbar:
+
+            z_est = h_ac.estimate(x)
+            loss = criterion(z_est, x)
+            loss.backward()
+            g = x.grad
+            g[slk_bus[0]] = 0
+            norm_g = torch.linalg.norm(g)
+            if norm_g == 0.0:
+                delta_f = (loss_prev - loss.item()) / abs(loss_prev)
+                converged = 0 <= delta_f <= self.tol
+                x, T, V, _, k_lm, loss, all_x_lm = final_opt(x, z, v, slk_bus, h_ac, nb)
+                all_x.extend(all_x_lm)
+                k += k_lm
+                pbar.set_postfix(loss=f"{loss:.4f}", k_lm=f"{k_lm}")
+                return x, T, V, converged, k, loss.item(), all_x
+            t = self.t0
+            t_prev = self.t0
+
+            while t >= self.t_min:
+                x_new = (x - t * g).detach()
+                if not torch.isfinite(x_new).all():
+                    t_prev = t
+                    t *= self.beta
+                    continue
+                z_est = h_ac.estimate(x_new)
+                loss_new = criterion(z_est, x_new)
+                if loss_new <= (1 - self.c * t) * loss :
+                    if t >= t_prev:
+                        t_prev = t
+                        t /= self.beta
+                        continue
+                    loss_prev = loss
+                    loss = loss_new
+                    x_prev = x.detach()
+                    x = x_new.detach()
+                    all_x.append(x.detach())
+                    x.requires_grad = True
+                    break
+                t_prev = t
+                t *= self.beta
+
+            delta_f = (loss_prev - loss.item()) / abs(loss_prev)
+            pbar.set_postfix(ftol=f"{delta_f.item():.4e}", loss=f"{loss.item():.4f}", t=f"{t:.4e}")
+            if t < self.t_min:
+                x, T, V, _, k_lm, loss, all_x_lm = final_opt(x, z, v, slk_bus, h_ac, nb)
+                all_x.extend(all_x_lm)
+                k += k_lm
+                pbar.set_postfix(loss=f"{loss:.4f}", k_lm=f"{k_lm}")
+                return x, T, V, converged, k, loss, all_x
+
+            converged = 0 < delta_f <= self.tol
+            if converged:
+                x, T, V, _, k_lm, loss, all_x_lm = final_opt(x, z, v, slk_bus, h_ac, nb)
+                all_x.extend(all_x_lm)
+                k += k_lm
+                pbar.set_postfix(loss=f"{loss:.4f}", k_lm=f"{k_lm}")
+                return x, T, V, converged, k, loss, all_x
+
+        x, T, V, _, k_lm, loss, all_x_lm = final_opt(x, z, v, slk_bus, h_ac, nb)
+        all_x.extend(all_x_lm)
+        k += k_lm
+        pbar.set_postfix(loss=f"{loss:.4f}", k_lm=f"{k_lm}")
+        return x, T, V, converged, k, loss, all_x
 
 
 class SGD_se(SEOptimizer):

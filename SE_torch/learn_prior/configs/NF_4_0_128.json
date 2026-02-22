@@ -1,0 +1,14 @@
+{
+  "num_epochs": 500,
+  "s_max": 1,
+  "lr":1e-4,
+  "wd": 1e-5,
+  "num_samples": 250000,
+  "batch_size": 512,
+  "num_blocks": 4,
+  "data_dim": 235,
+  "half_data_dim": 118,
+  "num_hidden_layers": 0,
+  "hidden_dim": 128,
+  "ckpt_name": "NF_4_0_128.pth"
+}

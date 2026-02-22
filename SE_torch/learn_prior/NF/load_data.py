@@ -25,9 +25,9 @@ def load_data(config, n_samples, cart=False, seed=42):
     slk_idx = sys.slk_bus[0] + sys.nb if cart else sys.slk_bus[0]
     if os.path.exists(f'../datasets/data{prefix}.pt'):
         data = torch.load(f'../datasets/data{prefix}.pt')
-        mean = torch.load(f'../datasets/mean{prefix}.pt')
-        std = torch.load(f'../datasets/std{prefix}.pt')
-        cov = torch.load(f'../datasets/cov{prefix}.pt')
+        mean = torch.load(f'../datasets/mean_NF{prefix}.pt')
+        std = torch.load(f'../datasets/std_NF{prefix}.pt')
+        cov = torch.load(f'../datasets/cov_NF{prefix}.pt')
     else:
         data_generator = DataGenerator()
         if cart:
@@ -46,16 +46,16 @@ def load_data(config, n_samples, cart=False, seed=42):
         torch.save(std, f'../datasets/std{prefix}.pt')
         torch.save(cov, f'../datasets/cov{prefix}.pt')
 
-    data = torch.concat([data[:, :slk_idx], data[:, slk_idx + 1:]], dim=1)
+    # data = torch.concat([data[:, :slk_idx], data[:, slk_idx + 1:]], dim=1)
     # mean, std, cov = data.mean(0), data.std(0), data.T.cov()
     # std[std < 1e-10] = 1
-    # cov += torch.eye(DATA_DIM * CHANNELS - 1)
-    # torch.save(mean, f'../datasets/mean{prefix}.pt')
-    # torch.save(std, f'../datasets/std{prefix}.pt')
-    # torch.save(cov, f'../datasets/cov{prefix}.pt')
+    # cov += torch.eye(DATA_DIM * CHANNELS)
+    # torch.save(mean, f'../datasets/mean_NF{prefix}.pt')
+    # torch.save(std, f'../datasets/std_NF{prefix}.pt')
+    # torch.save(cov, f'../datasets/cov_NF{prefix}.pt')
 
     data = (data - mean) / std
-    # data = torch.concat([data[:, :slk_idx], data[:, slk_idx + 1:]], dim=1)
+    # data = torch.concat([data[:, :slk_idx], torch.zeros(len(data), 1), data[:, slk_idx:]], dim=1)
     dataset = TensorDataset(data)
     n_train = int(0.8 * n_samples)
     n_test = n_samples - n_train

@@ -1,0 +1,29 @@
+{
+  "num_samples": 25000,
+  "batch_size": 40,
+  "device": "cpu",
+  "ckpt_name": "GNU_GNN_model_obs0.3.pth",
+  "data_path": "../datasets/GNU_GNN_data_obs0.3",
+  "file": "../../../nets/ieee118_186.mat",
+  "z_dim": 726,
+  "v_dim": 236,
+  "k_hops": 3,
+  "hidden_layers": 8,
+  "num_steps": 20,
+  "slk_bus": [68],
+  "data_gen_kwargs" : {
+    "keep_nans": true,
+    "flow": true,
+    "injection": true,
+    "voltage": true,
+    "current": false,
+    "noise": true,
+    "Pf_noise": 0.0004,
+    "Qf_noise": 0.0004,
+    "Cm_noise": 1e-3,
+    "Pi_noise": 16e-3,
+    "Qi_noise": 16e-3,
+    "Vm_noise": 0.0001,
+    "sample": 0.3
+  }
+}

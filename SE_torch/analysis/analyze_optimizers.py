@@ -12,9 +12,9 @@ from SE_torch.net_preprocess.process_net_data import parse_ieee_mat, System, Bra
 from SE_torch.utils import square_mag, normalize_measurements, RMSE, init_start_point
 from SE_torch.optimizers.GN_se import GN_se
 from SE_torch.optimizers.LM_opt import LMOpt
-from SE_torch.optimizers.FO_se import LBFGS_se, LBFGS_se_latent
+from SE_torch.optimizers.FO_se import LBFGS_se, LBFGS_se_latent, GDBT_se
 from SE_torch.learn_prior.GNU_GNN.models import GNU_Model
-from SE_torch.optimizers.se_loss import (SELoss, SELossGN, SELossNF, SELossVAE, SELossNFLat, SELossVAELat)
+from SE_torch.optimizers.se_loss import (SELoss, SELossGN, SELossNF, SELossVAE, SELossNFLat, SELossVAELat, SELossFM, SELossNF2, SELossNF2Lat, SELossFMLat)
 
 
 def _rmse_curve_from_all_x(all_x, T_true, V_true, nb):
@@ -125,20 +125,33 @@ def _plot_metric_vs_obs(obs_levels, stats_by_obs, metric_key, ylabel, title, sav
 
     obs_levels = np.array(obs_levels)
     first_obs = obs_levels[0]
-    opt_names = list(stats_by_obs[first_obs].keys())
-
+    # opt_names = list(stats_by_obs[first_obs].keys())
+    # opt_names = ['lm', 'lm_gs', 'lm_nf_small', 'lbfgs_nf', 'gdbt_nf', 'lm_nf_lat', 'lm_nf_nld', 'lm_nf']
+    opt_names = ['lm_gs', 'lm_nf_lat', 'lm_nf_nld', 'lm_nf']
+    # opt_names.reverse()
+    opt_name_map = {
+        'lm_nf': 'lmnf',
+        'lm_nf_small': 'wlmnf',
+        'lm_nf_nld': 'lmis',
+        'lm_nf_lat': 'lmil',
+        'lm_gs': 'lmgs',
+        'lbfgs_nf': 'lbfgsnf',
+        'gdbt_nf': 'gdnf',
+        'lm': 'lm'
+    }
+    opt_name_map = {k: v.upper() for k, v in opt_name_map.items()}
     if opt_name_map is None:
         opt_name_map = {k: k.upper() for k in opt_names}
 
     # ---- Figure style ----
     plt.figure(figsize=(7.0, 4.0), dpi=300)
     plt.rcParams.update({
-        "font.size": 11,
-        "axes.titlesize": 13,
-        "axes.labelsize": 12,
-        "legend.fontsize": 10,
-        "xtick.labelsize": 10,
-        "ytick.labelsize": 10,
+        "font.size": 9,
+        "axes.titlesize": 9,
+        "axes.labelsize": 9,
+        "legend.fontsize": 8,
+        "xtick.labelsize": 7,
+        "ytick.labelsize": 7,
     })
 
     colors = plt.cm.tab10.colors
@@ -166,7 +179,7 @@ def _plot_metric_vs_obs(obs_levels, stats_by_obs, metric_key, ylabel, title, sav
     plt.title(title)
 
     # ---- log scale ----
-    # plt.yscale("log")
+    plt.yscale("log")
 
     if ymin is not None or ymax is not None:
         plt.ylim(bottom=ymin, top=ymax)
@@ -264,6 +277,8 @@ def run_experiment(data, sys, branch, data_generator, optimizers, **kwargs):
 
     gen_data = data_generator.generate_measurements(sys, branch, device=None, **kwargs)
     z, v, meas_idx, agg_meas_idx, h_ac_cart, h_ac_polar, T_true, V_true, Vc_true = gen_data
+    # norm_H = torch.linalg.norm(h_ac_cart.H, dim=(1, 2)) + 1e-12
+    final_lm = LMOpt(loss_func=SELoss())
 
     x0 = torch.concatenate([T0, V0])
 
@@ -271,13 +286,15 @@ def run_experiment(data, sys, branch, data_generator, optimizers, **kwargs):
     rmse_curve = {}
 
     for opt_name, optimizer in optimizers.items():
+        # if 'gdbt' in opt_name:
+        #     norm_H = torch.linalg.norm(h_ac_cart.H, dim=(1, 2)) + 1e-12
         t0 = time.perf_counter()
 
         x_opt, T_opt, V_opt, opt_converged, k_opt, loss_opt, all_x_opt = optimizer(
             x0, z, v, sys.slk_bus, h_ac_polar, sys.nb
         )
-
         dt = time.perf_counter() - t0
+        # x_lm, T_lm, V_lm, lm_converged, k_lm, loss_lm, all_x_lm = optimizer(x_opt, z, v, sys.slk_bus, h_ac_polar, sys.nb)
 
         rmse[opt_name] = RMSE(T_true, V_true, T_opt.detach(), V_opt.detach())
         k[opt_name] = k_opt
@@ -292,7 +309,7 @@ def run_experiment(data, sys, branch, data_generator, optimizers, **kwargs):
 def run_all_experiments(config):
     net_file = config["net_file"]
     verbose = config.get("verbose", False)
-
+    max_iter = config.get("max_iter", 1000)
     obs_levels = config.get("observability_levels", [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8])
     ood_lvl = config.get("ood_lvl", .95)
     num_experiments = int(config.get("num_experiments_per_obs", 100))
@@ -314,19 +331,17 @@ def run_all_experiments(config):
     cov = torch.load("../learn_prior/datasets/cov_polar.pt")
 
     NF_prior_config_path = "../learn_prior/configs/NF_4_0_128.json"
-    VAE_config_path = "../learn_prior/configs/VAE_v0.5_config.json"
-
+    NF_prior_weak_config_path = "../learn_prior/configs/NF_2_0_128.json"
 
     pf_mean_by_type_id = {1: ood_lvl, 2: 0.98, 3: 0.99}
     optimizers = {
-        "gn": GN_se(),
         "lm": LMOpt(loss_func=SELoss()),
         "lm_gs": LMOpt(loss_func=SELossGN(m=m, Q=cov)),
         "lm_nf": LMOpt(loss_func=SELossNF(NF_config_path=NF_prior_config_path, with_log_det=True)),
         "lm_nf_nld": LMOpt(loss_func=SELossNF(NF_config_path=NF_prior_config_path, with_log_det=False)),
-        "lm_nf_lat": LMOpt(loss_func=SELossNFLat(NF_config_path=NF_prior_config_path, with_log_det=True), latent='dss'),
-        "lm_vae": LMOpt(loss_func=SELossVAE(VAE_config_path=VAE_config_path)),
-        "lm_vae_lat": LMOpt(loss_func=SELossVAELat(VAE_config_path=VAE_config_path), latent='dss'),
+        "lm_nf_nld_lat": LMOpt(loss_func=SELossNFLat(NF_config_path=NF_prior_config_path, with_log_det=False), latent='dss'),
+        "lm_nf_weak": LMOpt(loss_func=SELossNF(NF_config_path=NF_prior_weak_config_path, with_log_det=True)),
+        "gdbt_nf": GDBT_se(verbose=False, use_prior=True, prior_config_path=NF_prior_config_path),
         "lbfgs_nf": LBFGS_se(verbose=False, use_prior=True, prior_config_path=NF_prior_config_path),
     }
     kwargs_base["pf_mean_by_type_id"] = pf_mean_by_type_id
@@ -375,7 +390,7 @@ def run_all_experiments(config):
                 print(f"\n[obs={obs:.2f}] Trial {i + 1:03d}/{num_experiments}")
                 for opt in optimizers.keys():
                     print(
-                        f"  {opt.upper():<12} | "
+                        f"  {opt.upper():<15} | "
                         f"RMSE={rmse[opt]:.6f} | "
                         f"steps={k[opt]:4d} | "
                         f"conv={int(conv[opt])} | "
@@ -463,7 +478,7 @@ def run_pf_ood_sweep(config):
         "lm_nf": LMOpt(loss_func=SELossNF(NF_config_path=NF_prior_config_path, with_log_det=True)),
         "lm_nf_nld": LMOpt(loss_func=SELossNF(NF_config_path=NF_prior_config_path, with_log_det=False)),
         "lm_nf_lat": LMOpt(loss_func=SELossNFLat(NF_config_path=NF_prior_config_path, with_log_det=True), latent='dss'),
-        "lm_vae": LMOpt(loss_func=SELossVAE(VAE_config_path=VAE_config_path)),
+        # "lm_vae": LMOpt(loss_func=SELossVAE(VAE_config_path=VAE_config_path)),
         "lm_vae_lat": LMOpt(loss_func=SELossVAELat(VAE_config_path=VAE_config_path), latent='dss'),
         "lbfgs_nf": LBFGS_se(verbose=False, use_prior=True, prior_config_path=NF_prior_config_path),
     }
@@ -549,6 +564,7 @@ def gen_step_curves_plots(config):
 def gen_plots(config):
     out_dir = config.get("out_dir", "./results/observability_sweep")
     _ensure_dir(out_dir)
+    prefix = 'ID' if '_id_' in out_dir else 'OOD'
     results_json_path = os.path.join(out_dir, "mean_results_by_observability.json")
     stats_by_obs = json.load(open(results_json_path))
     obs_levels = list(stats_by_obs.keys())
@@ -559,7 +575,7 @@ def gen_plots(config):
         stats_by_obs=stats_by_obs,
         metric_key="rmse_mean",
         ylabel="RMSE",
-        title="RMSE vs Observability",
+        title=f"RMSE vs Observability - {prefix}",
         save_path_png=rmse_png,
         save_path_pdf=rmse_pdf,
     )
@@ -571,7 +587,7 @@ def gen_plots(config):
         stats_by_obs=stats_by_obs,
         metric_key="k_mean",
         ylabel="Mean number of steps",
-        title="Steps vs Observability",
+        title=f"Steps vs Observability - {prefix}",
         save_path_png=k_png,
         save_path_pdf=k_pdf,
     )
@@ -583,7 +599,7 @@ def gen_plots(config):
         stats_by_obs=stats_by_obs,
         metric_key="time_mean",
         ylabel="Mean runtime (sec)",
-        title="Runtime vs Observability",
+        title=f"Runtime vs Observability - {prefix}",
         save_path_png=time_png,
         save_path_pdf=time_pdf,
     )
@@ -592,14 +608,25 @@ def gen_plots(config):
 
 def main():
     torch.set_default_dtype(torch.float32)
-    config = json.load(open("./configs/analyze_optimizer_id_config.json"))
-    # config.setdefault("observability_levels", [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8])
-    config.setdefault("observability_levels", [0.8])
-    config.setdefault("num_experiments_per_obs", 100)
-    config.setdefault("out_dir", "./results/observability_id_logscale")
-    # config.setdefault("out_dir", "./results/observability_0.3")
+    config = json.load(open("./configs/analyze_optimizer_ood_config.json"))
+    config.setdefault("observability_levels", [0.2])
+    config.setdefault("num_experiments_per_obs", 10)
+    config.setdefault("out_dir", "./results/test")
     run_all_experiments(config)
-    # run_pf_ood_sweep(config)
+    gen_plots(config)
+
+    # config = json.load(open("./configs/analyze_optimizer_id_config.json"))
+    # config.setdefault("observability_levels", [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8])
+    # config.setdefault("num_experiments_per_obs", 100)
+    # config.setdefault("out_dir", "./results/observability_id_logscale")
+    # # run_all_experiments(config)
+    # gen_plots(config)
+    #
+    # config = json.load(open("./configs/analyze_optimizer_ood_config.json"))
+    # config.setdefault("observability_levels", [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8])
+    # config.setdefault("num_experiments_per_obs", 100)
+    # config.setdefault("out_dir", "./results/observability_ood_logscale")
+    # # run_all_experiments(config)
     # gen_plots(config)
 
 

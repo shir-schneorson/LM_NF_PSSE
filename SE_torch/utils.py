@@ -63,8 +63,11 @@ def init_start_point(sys, data=None, how='flat',
             V = torch.tensor(pmu['voltage'][:, -2])
 
     elif how == 'warm':
-        T = sys.bus['To']
-        V = sys.bus['Vo']
+        # T = sys.bus['To']
+        # V = sys.bus['Vo']
+        m_NF = torch.load("../learn_prior/datasets/mean_NF_polar.pt").to(torch.get_default_dtype())
+        T = m_NF[:sys.nb]
+        V = m_NF[sys.nb:]
 
     elif how == 'random':
         theta = torch.pi * random_init[0]

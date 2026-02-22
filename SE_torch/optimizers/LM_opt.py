@@ -11,7 +11,7 @@ class LMOpt(SEOptimizer):
         super(LMOpt, self).__init__(**kwargs)
         self.xtol = kwargs.get('xtol', 1e-7)
         self.ftol = kwargs.get('ftol', 1e-7)
-        self.max_iter = int(kwargs.get('max_iter', 500))
+        self.max_iter = int(kwargs.get('max_iter', 1000))
         self.verbose = kwargs.get('verbose', True)
         self.loss_func = kwargs.get('loss_func', SELoss(**kwargs))
         self.latent = kwargs.get('latent', None)
@@ -26,6 +26,7 @@ class LMOpt(SEOptimizer):
 
     def process_x(self, x, decode=False):
         x = x.clone().detach()
+        # x = self.loss_func.encode(x)
         if self.latent is not None or self.cart:
             if decode:
                 x = self.loss_func.decode(x)
@@ -111,10 +112,14 @@ class LMOpt(SEOptimizer):
         upper_vec = torch.linalg.solve_triangular(R_D_T, Q_D_b.unsqueeze(1), upper=True).squeeze(1)
         upper = (torch.norm(upper_vec) / max(delta, 1e-16)).item()
 
-        if torch.linalg.matrix_rank(J) == min(J.shape):
-            grad_phi = self._grad_phi_alpha(D, Dp, R).item()
-            lower = (-phi.item() / grad_phi) if grad_phi < 0 else 0.0
-        else:
+
+        try:
+            if torch.linalg.matrix_rank(J) == min(J.shape):
+                grad_phi = self._grad_phi_alpha(D, Dp, R).item()
+                lower = (-phi.item() / grad_phi) if grad_phi < 0 else 0.0
+            else:
+                lower = 0.0
+        except torch.linalg.LinAlgError:
             lower = 0.0
 
         for _ in range(max_iter):
@@ -162,7 +167,7 @@ class LMOpt(SEOptimizer):
         return delta / torch.norm(D @ x).item()
 
     def __call__(self, x0, z, v, slk_bus, h_ac, nb, norm_H=None):
-        self.loss_func.update_params(z, v, slk_bus, h_ac, nb)
+        self.loss_func.update_params(z, v, slk_bus, h_ac, nb, norm_H)
 
         all_x = [x0.clone().detach()]
         x = self.process_x(x0)
@@ -176,7 +181,7 @@ class LMOpt(SEOptimizer):
         delta = self.delta_init
         converged = False
         it = 0
-        pbar = tqdm(range(self.max_iter), desc=f"Optimizing with LM{self.prefix}", leave=True, colour='green',
+        pbar = tqdm(range(self.max_iter), desc=f"Optimizing with LM{self.prefix}", disable=not self.verbose, leave=True, colour='green',
                     postfix={'loss': f"{f.item():.4f}"})
         for it in pbar:
             step, lam = self.update_step(res, J, grad, D, delta)
@@ -199,6 +204,7 @@ class LMOpt(SEOptimizer):
             delta = self.update_step_bound(rho, f, fp, Jp, Dp, lam, delta_prev=delta)
 
             pbar.set_postfix(ftol=f"{ftol:.4e}", xtol=f"{xtol:.4e}", loss=f"{f.item():.4f}")
+
         x = self.process_x(x, decode=True)
         T, V = x[:nb], x[nb:]
         return x, T, V, converged, it, f.item(), all_x

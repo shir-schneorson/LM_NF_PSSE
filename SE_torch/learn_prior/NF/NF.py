@@ -74,6 +74,13 @@ class AffineCouplingLayer(nn.Module):
         # Sum over features; return [B]
         return torch.sum(-log_s, dim=1)
 
+    def log_det_jacobian(self, z):
+        z_l, _ = z.chunk(2, dim=1)
+        log_s = self.log_s(z_l)
+        log_s = S_MAX * torch.tanh(log_s)
+        # Sum over features; return [B]
+        return torch.sum(log_s, dim=1)
+
     def log_det_inv_jacobian_residuals(self, y):
         y_l, _ = y.chunk(2, dim=1)
         log_s = self.log_s(y_l)
@@ -126,6 +133,14 @@ class FlowModel(nn.Module):
             y = perm_layer.inverse(ac_layer.inverse(y))
         return log_det
 
+    def log_det_jacobian(self, z):
+        log_det = torch.zeros(z.shape[0])
+        for ac_layer, perm_layer in zip(self.ac_layers, self.perm_layers):
+            z = perm_layer(z)
+            log_det = log_det + ac_layer.log_det_jacobian(z)
+            z = ac_layer(z)
+        return log_det
+
     def log_det_inv_jacobian_residuals(self, y):
         log_det = torch.zeros_like(y)
         for ac_layer, perm_layer in reversed(list(zip(self.ac_layers, self.perm_layers))):
@@ -154,7 +169,7 @@ class NormalizingFlowTrainer:
     def __init__(self, model, data_loaders, num_epochs=NUM_EPOCHS,
                  learning_rate=LEARNING_RATE, ckpt_path='', device='cpu', dtype=torch.get_default_dtype(), weight_decay=WEIGHT_DECAY, betas=BETAS):
         self.model = model
-        self.train_loader, self.test_loader, self.train_dataset, self.config = data_loaders
+        self.train_loader, self.test_loader, self.train_dataset, self.test_dataset, self.config = data_loaders
 
         self.optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
         self.scheduler = optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=num_epochs)
