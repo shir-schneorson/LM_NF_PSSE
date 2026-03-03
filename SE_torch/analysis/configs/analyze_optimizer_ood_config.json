@@ -1,0 +1,23 @@
+{
+  "net_file": "../../nets/ieee118_186.mat",
+  "num_experiments": 100,
+  "verbose": true,
+  "max_iter": 200,
+  "ood_lvl": 0.65,
+  "generator_kwargs": {
+    "sample": 0.2,
+    "keep_nans": true,
+    "flow": true,
+    "injection": true,
+    "voltage": true,
+    "current": false,
+    "noise": true,
+    "Pf_noise": 0.00004,
+    "Qf_noise": 0.00004,
+    "Cm_noise": 1e-4,
+    "Pi_noise": 16e-4,
+    "Qi_noise": 16e-4,
+    "Vm_noise": 0.0001,
+    "verbose": true
+  }
+}
