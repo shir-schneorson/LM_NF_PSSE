@@ -160,16 +160,17 @@ class System:
             self.Yii = kwargs.get('Yii')
             self.Yij = kwargs.get('Yij')
 
-    def copy(self):
+    def copy(self, device=torch.device, dtype=torch.float32):
+        complex_dtype = torch.complex64 if device.type=='mps' else torch.complex128
         baseMVA = self.baseMVA.copy()
         bus = self.bus.copy()
         branch = self.branch.copy()
         nbr = self.nbr
         nb = self.nb
         slk_bus = self.slk_bus
-        Ybus = self.Ybus.clone()
-        Yii = self.Yii.clone()
-        Yij = self.Yij.clone()
+        Ybus = self.Ybus.clone().to(device=device.type, dtype=complex_dtype)
+        Yii = self.Yii.clone().to(device=device.type, dtype=complex_dtype)
+        Yij = self.Yij.clone().to(device=device.type, dtype=complex_dtype)
         return System(**{'baseMVA': baseMVA, 'bus': bus, 'branch': branch,
                        'nbr': nbr, 'nb': nb, 'slk_bus':slk_bus, 'Ybus': Ybus,
                        'Yii': Yii, 'Yij': Yij})

@@ -3,11 +3,6 @@ import torch
 from SE_torch.net_preprocess.compose_measurement import Pi, Qi, Pf, Qf, Vm, Cm
 
 def complex_to_real_block(H: torch.Tensor) -> torch.Tensor:
-    """
-    Convert complex matrices H (..., n, n) to real block matrices G (..., 2n, 2n):
-        G = [[Re(H), -Im(H)],
-             [Im(H),  Re(H)]]
-    """
     if not torch.is_complex(H):
         raise TypeError("H must be a complex tensor")
 
@@ -126,7 +121,8 @@ class H_AC:
         self.Hi = Hinj(self.pi, self.qi, self.nb, device=self.device)
         self.Hv = Hvm(self.vm, self.nb, device=self.device)
         self.H = torch.cat([self.Hf, self.Hc, self.Hi, self.Hv], dim=0)
-        self.H  = complex_to_real_block(self.H).to(dtype=torch.get_default_dtype())
+        self.H_complex = self.H.clone()
+        self.H  = complex_to_real_block(self.H).to(dtype=torch.float64)
 
     def _update_device_dtype(self, device, dtype):
         self.device = device
@@ -134,13 +130,12 @@ class H_AC:
         self.H = self.H.to(device, dtype)
 
     def estimate(self, x):
+        x = x.to(device=self.device, dtype=torch.float64)
         z_est = (torch.tensordot(self.H, x, dims=([2], [0])) * x).sum(dim=-1)
-        return z_est
+        return z_est.to(dtype=self.dtype, device=self.device)
 
     def jacobian(self, x):
-        J = 2 * torch.tensordot(self.H, x, dims=([2], [0])) # (M, nb) complex
-        # J_conj = torch.conj(J)
-        # J = torch.concat([J.imag, J.real], dim=1)
-        # J_conj = torch.concat([J_conj.imag, J_conj.real], dim=1)
+        x = x.to(device=self.device, dtype=torch.float64)
+        J = 2 * torch.tensordot(self.H, x, dims=([2], [0]))
 
-        return J
+        return J.to(dtype=self.dtype, device=self.device)

@@ -1,3 +1,14 @@
+"""Trust-region Levenberg-Marquardt solver (the paper's Algorithm 1).
+
+`LMOpt` performs MAP state estimation by damped Gauss-Newton steps with a
+trust-region update. The prior is supplied through the `loss_func` (an
+`se_loss.SELoss` subclass): a plain data-fit loss gives model-only **LM**, a
+Gaussian latent prior gives **LMGS**, and a normalizing-flow latent prior gives
+**LMNF** / **LMNF-NLD** (with or without the log-determinant correction). Set
+``latent='ss'`` to optimize in the prior's latent space (recovering the state as
+``x = f(u)`` on return).
+"""
+
 import torch
 import math as mt
 from tqdm import tqdm
@@ -7,11 +18,12 @@ from SE_torch.optimizers.se_loss import SELoss
 
 
 class LMOpt(SEOptimizer):
+    """Levenberg-Marquardt state estimator with trust-region damping."""
     def __init__(self, **kwargs):
         super(LMOpt, self).__init__(**kwargs)
-        self.xtol = kwargs.get('xtol', 1e-7)
-        self.ftol = kwargs.get('ftol', 1e-7)
-        self.max_iter = int(kwargs.get('max_iter', 1000))
+        self.xtol = kwargs.get('xtol', 1e-6)
+        self.ftol = kwargs.get('ftol', 1e-8)
+        self.max_iter = int(kwargs.get('max_iter', 100))
         self.verbose = kwargs.get('verbose', True)
         self.loss_func = kwargs.get('loss_func', SELoss(**kwargs))
         self.latent = kwargs.get('latent', None)
@@ -24,16 +36,16 @@ class LMOpt(SEOptimizer):
         self.rho_tol_max = kwargs.get('rho_tol_max', 0.75)
         self.sb_inc = kwargs.get('sb_inc', 2.0)
 
+        self.device = torch.device(kwargs.get('device', 'cpu'))
+
     def process_x(self, x, decode=False):
-        x = x.clone().detach()
-        # x = self.loss_func.encode(x)
-        if self.latent is not None or self.cart:
-            if decode:
-                x = self.loss_func.decode(x)
-            else:
-                x = self.loss_func.encode(x)
-                if self.latent != 'ss':
-                    x = torch.zeros_like(x)
+        if decode:
+            x = self.loss_func.decode(x)
+        else:
+            x = self.loss_func.x_init(x)
+            x = self.loss_func.encode(x)
+            if self.latent is not None and self.latent != 'ss':
+                x = torch.zeros_like(x)
         return x
 
     def compute_D(self, J, D_prev=None):
@@ -98,7 +110,7 @@ class LMOpt(SEOptimizer):
         ).squeeze(1)
         return -norm_Dp * torch.norm(partial_grad).pow(2)
 
-    def update_damping_factor(self, res, J, grad, D, delta, tol=1e-10, max_iter=50):
+    def update_damping_factor(self, res, J, grad, D, delta, tol=1e-16, max_iter=100):
         alpha = 0.0
         phi, Dp, R, Q = self._phi_alpha(res, J, grad, D, delta, alpha)
 
@@ -145,19 +157,20 @@ class LMOpt(SEOptimizer):
 
         return alpha
 
-    def compute_rho(self, x, D, step_size, alpha):
+    def compute_rho(self, x, D, step_size, alpha, grad=None):
         f = self.loss_func.compute_f(x)
         fp = self.loss_func.compute_f(x, step_size)
         Jp = torch.norm(self.loss_func.compute_J(x) @ step_size).pow(2)
         Dp = torch.norm(D @ step_size).pow(2)
+        grad_p = torch.norm(grad @ step_size)
         if fp > f:
-            return 0.0, f, fp, Jp, Dp
+            return 0.0, f, fp, Jp, Dp, grad_p
         num = (f - fp) / f.abs()
-        denom = (.5 * Jp + (alpha * Dp)) / f.abs()
-        return (num / denom).item(), f, fp, Jp, Dp
+        denom = (0.5 * Jp + alpha * Dp) / f.abs()
+        return (num / denom).item(), f, fp, Jp, Dp, grad_p
 
-    def _compute_ftol(self, f, Jp, Dp, alpha):
-        denom = (.5 * Jp + (alpha * Dp)) / f.abs()
+    def _compute_ftol(self, f, Jp, Dp, grad_p, alpha):
+        denom = (0.5 * Jp + alpha * Dp) / f.abs()
         return denom.item()
 
     def _compute_xtol(self, x, D, delta):
@@ -167,9 +180,13 @@ class LMOpt(SEOptimizer):
         return delta / torch.norm(D @ x).item()
 
     def __call__(self, x0, z, v, slk_bus, h_ac, nb, norm_H=None):
+        x0 = x0.to(self.device)
+        z = z.to(self.device)
+        v = v.to(self.device)
+        if norm_H is not None:
+            norm_H = norm_H.to(self.device)
         self.loss_func.update_params(z, v, slk_bus, h_ac, nb, norm_H)
 
-        all_x = [x0.clone().detach()]
         x = self.process_x(x0)
 
         J = self.loss_func.compute_J(x)
@@ -184,27 +201,43 @@ class LMOpt(SEOptimizer):
         pbar = tqdm(range(self.max_iter), desc=f"Optimizing with LM{self.prefix}", disable=not self.verbose, leave=True, colour='green',
                     postfix={'loss': f"{f.item():.4f}"})
         for it in pbar:
+            if hasattr(self.loss_func, 'set_iter'):
+                self.loss_func.set_iter(it)
             step, lam = self.update_step(res, J, grad, D, delta)
-            rho, f, fp, Jp, Dp = self.compute_rho(x, D, step, lam)
+            rho, f, fp, Jp, Dp, grad_p = self.compute_rho(x, D, step, lam, grad)
 
             if rho > 1e-4:
-                x = self.loss_func.update_x(x, step)
+                x = self.loss_func.update_x(x, step).detach()
                 J = self.loss_func.compute_J(x)
                 res = self.loss_func.compute_residuals(x)
                 grad = self.loss_func.compute_grad(x)
                 D = self.compute_D(J, D_prev=D)
 
-                all_x.append(self.process_x(x, decode=True))
-
-            ftol = self._compute_ftol(f, Jp, Dp, lam)
+            ftol = self._compute_ftol(f, Jp, Dp, grad_p, lam)
             xtol = self._compute_xtol(x, D, delta)
-            if rho >= 0 and ftol <= self.ftol and xtol <= self.xtol:
+            if ftol <= self.ftol and xtol <= self.xtol:
                 converged = True
                 break
             delta = self.update_step_bound(rho, f, fp, Jp, Dp, lam, delta_prev=delta)
-
-            pbar.set_postfix(ftol=f"{ftol:.4e}", xtol=f"{xtol:.4e}", loss=f"{f.item():.4f}")
+            ll = self.loss_func.likelihood_loss(x)
+            prior_loss = self.loss_func.prior_loss(x)
+            pbar.set_postfix(ftol=f"{ftol:.4e}",
+                             xtol=f"{xtol:.4e}",
+                             loss=f"{f.item():.4f}",
+                             ll=f"{ll:.4f}",
+                             pl=f"{prior_loss.item():.4f}",)
+        ftol = self._compute_ftol(f, Jp, Dp, grad_p, lam)
+        xtol = self._compute_xtol(x, D, delta)
+        ll = self.loss_func.likelihood_loss(x)
+        prior_loss = self.loss_func.prior_loss(x)
+        pbar.set_postfix(ftol=f"{ftol:.4e}",
+                         xtol=f"{xtol:.4e}",
+                         loss=f"{f.item():.4f}",
+                         ll=f"{ll:.4f}",
+                         pl=f"{prior_loss.item():.4f}", )
+        x_encoded = x.clone().detach()
 
         x = self.process_x(x, decode=True)
         T, V = x[:nb], x[nb:]
-        return x, T, V, converged, it, f.item(), all_x
+        return x, T, V, converged, it, f.item(), x_encoded
+

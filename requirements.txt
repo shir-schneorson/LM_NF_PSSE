@@ -1,5 +1,8 @@
 numpy
-pandas
-torch
 scipy
-pandapower[all]
+pandas
+matplotlib
+tqdm
+torch
+torchvision
+pytorch_lightning

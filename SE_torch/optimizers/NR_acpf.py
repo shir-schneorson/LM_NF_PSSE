@@ -29,7 +29,8 @@ def _coo_mv(vals, rows, cols, shape, v):
     """
     idx = torch.stack([rows.long(), cols.long()], dim=0)
     A = torch.sparse_coo_tensor(idx, vals, size=shape, device=v.device, dtype=v.dtype).coalesce()
-    y = torch.sparse.mm(A, v.view(-1,1)).view(-1)
+    device = v.device
+    y = torch.sparse.mm(A.to('cpu'), v.view(-1,1).to('cpu')).view(-1).to(device=device)
     return y
 
 # ---------- constraints ----------
@@ -63,12 +64,12 @@ def qv_limits(user, sys, Ql, device=None, dtype=torch.float64):
 # ---------- indices & algebra precompute ----------
 
 def idx_par1(sys, device=None, dtype=None):
-    Yte =  sys.Yij.clone()
-    Yij_mod = sys.Yij.clone()
+    Yte =  sys.Yij.clone().to(device=device)
+    Yij_mod = sys.Yij.clone().to(device=device)
     slk = int(sys.slk_bus[0])
 
     # zero slack-bus row
-    Yij_mod[slk, :] = 0
+    Yij_mod[slk, :] = torch.zeros(1)
 
     alg, idx = {}, {}
 
@@ -76,14 +77,14 @@ def idx_par1(sys, device=None, dtype=None):
     alg['i'], alg['j'] = ii.long(), jj.long()
 
     GijBij = sys.Ybus[alg['i'], alg['j']]
-    alg['Gij'] = torch.real(GijBij)
-    alg['Bij'] = torch.imag(GijBij)
+    alg['Gij'] = torch.real(GijBij).to(device=device, dtype=dtype)
+    alg['Bij'] = torch.imag(GijBij).to(device=device, dtype=dtype)
 
     Yte2 = Yte.clone()
-    Yte2 = torch.concat((Yte2[:slk], Yte2[slk + 1:]), dim=0)
+    Yte2 = torch.concat((Yte2[:slk], Yte2[slk + 1:]), dim=0).to(device=device)
     # Yte2 = _remove_rowcol(Yte2, row=slk, col=None)
     fd1i, _ = torch.nonzero(Yte2, as_tuple=True)
-    alg['fd1i'] = fd1i.long()
+    alg['fd1i'] = fd1i.long().to(device=device)
 
     alg['ii'] = _to_tensor(sys.bus.idx_bus.values, device=device, dtype=torch.long)
     # drop slack index in 'ii'
@@ -94,7 +95,7 @@ def idx_par1(sys, device=None, dtype=None):
     idx['j11']['ij'] = (alg['j'] != slk)
 
     # Yte3 = _remove_rowcol(Yte2, row=None, col=slk)
-    Yte3 = torch.concat((Yte2[:, :slk], Yte2[:, slk + 1:]), dim=1)
+    Yte3 = torch.concat((Yte2[:, :slk], Yte2[:, slk + 1:]), dim=1).to(device=device)
     q, w = torch.nonzero(Yte3, as_tuple=True)
 
     bu = torch.arange(sys.nb - 1, device=device, dtype=torch.long)
@@ -109,8 +110,8 @@ def idx_par2(sys, alg, idx, device=None, dtype=torch.float64):
     alg['pq'] = pq.long()
     alg['Npq'] = int(pq.numel())
 
-    Yij = sys.Yij.clone()
-    Ybus = sys.Ybus.clone()
+    Yij = sys.Yij.clone().to(device=device)
+    Ybus = sys.Ybus.clone().to(device=device)
     slk = int(sys.slk_bus[0])
 
     fdi, fdj = torch.nonzero(Yij[pq, :], as_tuple=True)
@@ -177,8 +178,11 @@ def idx_par2(sys, alg, idx, device=None, dtype=torch.float64):
 # ---------- limit handling (Q-V switching) ----------
 
 def cq(sys, alg, idx, pf, Qcon, V, T, Qg, Ql, Qgl, Pgl, DelPQ, device=None):
-    Ybus = _to_tensor(sys.Ybus, device=device, dtype=torch.complex128)
-    Yij  = _to_tensor(sys.Yij,  device=device, dtype=torch.complex128)
+    cmx_dtype = torch.complex64 if device =='mps' else torch.complex128
+    real_dtype = torch.float32 if device =='mps' else torch.float64
+
+    Ybus = _to_tensor(sys.Ybus, device=device, dtype=cmx_dtype)
+    Yij  = _to_tensor(sys.Yij,  device=device, dtype=cmx_dtype)
     slk  = int(sys.slk_bus[0])
 
     Vc = torch.polar(V, T)  # V * exp(jT)
@@ -228,8 +232,10 @@ def cq(sys, alg, idx, pf, Qcon, V, T, Qg, Ql, Qgl, Pgl, DelPQ, device=None):
     return sys, alg, idx, pf, Qcon, V, T, Qg, Qgl, DelPQ
 
 def cv(sys, alg, idx, pf, Vcon, DelPQ, V, T, Pgl, Qgl, device=None):
-    Ybus = _to_tensor(sys.Ybus, device=device, dtype=torch.complex128)
-    Yij  = _to_tensor(sys.Yij,  device=device, dtype=torch.complex128)
+    cmx_dtype = torch.complex64 if device == 'mps' else torch.complex128
+    real_dtype = torch.float32 if device == 'mps' else torch.float64
+    Ybus = _to_tensor(sys.Ybus, device=device, dtype=cmx_dtype)
+    Yij  = _to_tensor(sys.Yij,  device=device, dtype=cmx_dtype)
 
     Vmin_violated = torch.nonzero((V < Vcon[:,0]) & (Vcon[:,2] == 1), as_tuple=True)[0]
     Vmax_violated = torch.nonzero((V > Vcon[:,1]) & (Vcon[:,2] == 1), as_tuple=True)[0]
@@ -378,33 +384,33 @@ def NR_PF(sys, loads, gens, x_init, user, device=None, rtol=None):
     Arrays in sys.* can be NumPy; they’re converted to torch on-the-fly.
     """
     # choose dtypes
-    f64 = torch.float64
-    c128 = torch.complex128
+    real_dtype = torch.float32 if device =='mps' else torch.float64
+    cmx_dtype = torch.complex64 if device =='mps' else torch.complex128
 
     pf = {'method': 'AC Power Flow using Newton-Raphson Algorithm',
-          'limit':  torch.zeros((sys.nb, 2), dtype=f64).numpy()}  # keep this as numpy-compatible
+          'limit':  torch.zeros((sys.nb, 2), dtype=real_dtype).numpy()}  # keep this as numpy-compatible
 
-    x_init = _to_tensor(x_init, device=device, dtype=f64)
+    x_init = _to_tensor(x_init, device=device, dtype=real_dtype)
     T = x_init[:, 0].clone()
     V = x_init[:, 1].clone()
 
-    loads = _to_tensor(loads, device=device, dtype=f64)
-    gens  = _to_tensor(gens,  device=device, dtype=f64)
+    loads = _to_tensor(loads, device=device, dtype=real_dtype)
+    gens  = _to_tensor(gens,  device=device, dtype=real_dtype)
 
     Pl, Ql = loads[:, 0], loads[:, 1]
     Pg, Qg = gens[:, 0],  gens[:, 1]
 
     No = 0
 
-    Qcon, Vcon = qv_limits(user, sys, Ql, device=device, dtype=f64)
-    alg, idx = idx_par1(sys, device=device, dtype=f64)
-    alg, idx = idx_par2(sys, alg, idx, device=device, dtype=f64)
+    Qcon, Vcon = qv_limits(user, sys, Ql, device=device, dtype=real_dtype)
+    alg, idx = idx_par1(sys, device=device, dtype=real_dtype)
+    alg, idx = idx_par2(sys, alg, idx, device=device, dtype=real_dtype)
 
     Vini = torch.polar(V, T)
     Pgl = Pg - Pl
     Qgl = Qg - Ql
 
-    Ybus = _to_tensor(sys.Ybus, device=device, dtype=c128)
+    Ybus = _to_tensor(sys.Ybus, device=device, dtype=cmx_dtype)
 
     DelS = Vini * torch.conj(torch.matmul(Ybus, Vini)) - (Pgl + 1j * Qgl)
     DelPQ = torch.cat((torch.real(DelS[alg['ii']]), torch.imag(DelS[alg['pq']])))
@@ -430,11 +436,11 @@ def NR_PF(sys, loads, gens, x_init, user, device=None, rtol=None):
                 sys, alg, idx, pf, Vcon, DelPQ, V, T, Pgl, Qgl, device=device
             )
 
-        alg = data_jacobian(T, V, alg, sys.nb, device=device, dtype=f64)
-        J11 = jacobian11(V, alg, idx['j11'], sys.nb, device=device, dtype=f64)
-        J12 = jacobian12(V, alg, idx['j12'], sys.nb, device=device, dtype=f64)
-        J21 = jacobian21(alg, idx['j21'], sys.nb, device=device, dtype=f64)
-        J22 = jacobian22(V, alg, idx['j22'], device=device, dtype=f64)
+        alg = data_jacobian(T, V, alg, sys.nb, device=device, dtype=real_dtype)
+        J11 = jacobian11(V, alg, idx['j11'], sys.nb, device=device, dtype=real_dtype)
+        J12 = jacobian12(V, alg, idx['j12'], sys.nb, device=device, dtype=real_dtype)
+        J21 = jacobian21(alg, idx['j21'], sys.nb, device=device, dtype=real_dtype)
+        J22 = jacobian22(V, alg, idx['j22'], device=device, dtype=real_dtype)
 
         J = torch.block_diag(J11, J22)
         J[:J11.size(0), J11.size(1):] = J12
@@ -444,7 +450,7 @@ def NR_PF(sys, loads, gens, x_init, user, device=None, rtol=None):
         TV = torch.concat((T, V[alg['pq']]))
 
         slk = int(sys.slk_bus[0])
-        dTV_full = torch.zeros_like(TV, device=device, dtype=f64)
+        dTV_full = torch.zeros_like(TV, device=device, dtype=real_dtype)
         dTV_full[:slk] = dTV[:slk]
         dTV_full[slk + 1:] = dTV[slk:]
 

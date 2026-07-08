@@ -18,7 +18,7 @@ from SE_torch.net_preprocess.process_net_data import parse_ieee_mat, System
 # )
 DEVICE = "cpu"
 DTYPE = torch.float32  # MPS is best with float32
-torch.set_default_dtype(DTYPE)
+# torch.set_default_dtype(DTYPE)
 
 NUM_EPOCHS = 20
 BATCH_SIZE = 512

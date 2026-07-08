@@ -32,12 +32,17 @@ def square_mag(z: torch.Tensor, var: torch.Tensor, agg_meas_idx: dict[str, torch
 def RMSE(T_true: torch.Tensor, V_true: torch.Tensor, T_est: torch.Tensor, V_est: torch.Tensor):
     u_true = V_true.to(dtype=torch.get_default_dtype()) * torch.exp(1j * T_true.to(torch.get_default_dtype()))
     u_est  = V_est.to(dtype=torch.get_default_dtype())  * torch.exp(1j * T_est.to(torch.get_default_dtype()))
+    u_true_re = u_true.real
+    u_est_re = u_est.real
+    u_true_im = u_true.imag
+    u_est_im = u_est.imag
+    per_bus = (u_est_re - u_true_re).pow(2) + (u_est_im - u_true_im).pow(2)
+    rmse_v = per_bus.mean(dim=-1).sqrt().mean()
+    # num = torch.linalg.norm(u_est - u_true)
+    # den = torch.linalg.norm(u_true) + 1e-12
 
-    num = torch.linalg.norm(u_est - u_true)
-    den = torch.linalg.norm(u_true) + 1e-12
-
-    err = (num / den).real
-    return err
+    # err = (num / den).real
+    return rmse_v
 
 def RMSE_polar(T_true: torch.Tensor, V_true: torch.Tensor, T_est: torch.Tensor, V_est: torch.Tensor):
     err_T = T_true - T_est
@@ -47,11 +52,12 @@ def RMSE_polar(T_true: torch.Tensor, V_true: torch.Tensor, T_est: torch.Tensor, 
 
 
 def init_start_point(sys, data=None, how='flat',
-                     flat_init=(0, 1), random_init=(0.3, 1, 1e-2)):
+                     flat_init=(0., 1.), random_init=(0.3, 1, 1e-2)):
     if how == 'flat':
-        T = torch.deg2rad(torch.full((sys.nb,), flat_init[0], dtype=torch.get_default_dtype()))
+        T = torch.full((sys.nb,), flat_init[0], dtype=torch.get_default_dtype())
         T[sys.slk_bus[0]] = sys.slk_bus[1]
         V = torch.full((sys.nb,), flat_init[1], dtype=torch.get_default_dtype())
+        V[sys.slk_bus[0]] = sys.slk_bus[2]
 
     elif how == 'exact':
         pmu = data['data'].get('pmu')
@@ -63,20 +69,19 @@ def init_start_point(sys, data=None, how='flat',
             V = torch.tensor(pmu['voltage'][:, -2])
 
     elif how == 'warm':
-        # T = sys.bus['To']
-        # V = sys.bus['Vo']
-        m_NF = torch.load("../learn_prior/datasets/mean_NF_polar.pt").to(torch.get_default_dtype())
+        m_NF = torch.load(
+            "../data_parser/data/time_series4/mean_gaussian_vam.pt").to(torch.get_default_dtype())
         T = m_NF[:sys.nb]
         V = m_NF[sys.nb:]
 
     elif how == 'random':
         theta = torch.pi * random_init[0]
         T = torch.empty(sys.nb).uniform_(-theta, theta)
-        T[sys.slk_bus[0]] = 0
+        T[sys.slk_bus[0]] = 0.
 
         mu, sigma = random_init[1], torch.sqrt(torch.tensor(random_init[2]))
         V = torch.normal(mu, sigma, size=(sys.nb,))
-        V[sys.slk_bus[0]] = 1
+        V[sys.slk_bus[0]] = 1.
 
     else:
         T = torch.rand(sys.nb) - 0.5

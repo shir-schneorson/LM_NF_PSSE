@@ -45,18 +45,22 @@ class WeightedSEWithPriorLoss(nn.Module):
         ckpt_path = f"../learn_prior/NF/models/{NF_config.get('ckpt_name')}"
         self.flow_model = FlowModel(**NF_config)
         self.flow_model.load_state_dict(torch.load(ckpt_path))
-        self.mean = torch.load("../learn_prior/datasets/mean_polar.pt").to(dtype=torch.get_default_dtype())
-        self.std = torch.load("../learn_prior/datasets/std_polar.pt").to(dtype=torch.get_default_dtype())
+        self.mean = torch.load("../learn_prior/datasets/mean_NF_polar_v0.1.pt").to(dtype=torch.get_default_dtype())
+        self.cov = torch.load("../learn_prior/datasets/cov_NF_polar_v0.1.pt").to(dtype=torch.get_default_dtype())
         self.prior_dist = MultivariateNormal(torch.zeros(DATA_DIM * CHANNELS -1), torch.eye(DATA_DIM * CHANNELS -1))
         self.lh_dist = MultivariateNormal(self.z, torch.diag(self.v))
 
+        remove_slack = torch.eye(DATA_DIM * CHANNELS)
+        self.remove_slack = torch.cat([remove_slack[:slk_bus], remove_slack[slk_bus + 1:]], dim=0).to(dtype=torch.get_default_dtype())
+
     def forward(self, z_est, x):
         self.flow_model.eval()
+        # x_red = self.remove_slack @ x
         x = torch.concat([x[:self.slk_bus], x[self.slk_bus + 1:]])
         x_norm = ((x - self.mean) /self.std).unsqueeze(0).to(device='cpu', non_blocking=False)
-        eps = self.flow_model.inverse(x_norm).to(device='cpu').squeeze(0)
+        eps = self.flow_model(x_norm).to(device='cpu').squeeze(0)
         prior = .5 * torch.norm(eps).pow(2)
-        log_det = self.flow_model.log_det_inv_jacobian(x_norm).to(device='cpu')
+        log_det = self.flow_model.log_det_jacobian(x_norm).to(device='cpu')
         pl = prior - log_det
         res_h = (self.R @ (self.z - z_est)) / self.norm_H
         lh = .5 * torch.norm(res_h).pow(2)

@@ -154,7 +154,8 @@ def fv(V, vm, nb):
     return Fv
 
 def jv(V, vm, nb):
-    V_V = torch.sparse_coo_tensor(torch.vstack([torch.arange(vm.N), vm.i]), 2 * V[vm.i], (vm.N, nb))
+    # V_V = torch.sparse_coo_tensor(torch.vstack([torch.arange(vm.N), vm.i]), torch.ones_like(V[vm.i]), (vm.N, nb))
+    V_V = torch.sparse_coo_tensor(torch.vstack([torch.arange(vm.N), vm.i]), 2. * V[vm.i], (vm.N, nb))
     V_T = torch.zeros((vm.N, nb))
 
     Jv = torch.cat([V_T, V_V.to_dense()], dim=1)
